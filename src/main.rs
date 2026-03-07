@@ -21,6 +21,15 @@ use crate::irc::message::OutboundMessage;
 use crate::tui::app::{App, BufferLine, ChatMessage};
 use crate::tui::ui::draw;
 
+/// Acquire the IRC stream exactly once after a successful connect and store it
+/// on `app`. Logs an error message if the stream cannot be obtained.
+fn attach_stream(app: &mut App) {
+    match app.client.stream() {
+        Ok(s) => app.irc_stream = Some(s),
+        Err(e) => app.push_server_msg(format!("Warning: could not open IRC stream: {}", e)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -106,10 +115,12 @@ async fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         // Quit via Ctrl-C or Ctrl-Q
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
+            app.irc_stream = None;
             let _ = app.client.disconnect().await;
         }
         KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
+            app.irc_stream = None;
             let _ = app.client.disconnect().await;
         }
 
@@ -193,9 +204,11 @@ async fn handle_command(app: &mut App, line: &str) {
             let config = crate::irc::client::ClientConfig::new(server, port, nick);
             app.client = crate::irc::client::IrcClient::new(config);
             app.channel_mgr = ChannelManager::new();
+            app.irc_stream = None;
 
             match app.client.connect().await {
                 Ok(()) => {
+                    attach_stream(app);
                     app.push_server_msg(format!("Connected to {}:{}", server, port));
                     app.set_status(format!("connected to {}", server));
                 }
@@ -206,15 +219,18 @@ async fn handle_command(app: &mut App, line: &str) {
             }
         }
 
-        "/disconnect" => match app.client.disconnect().await {
-            Ok(()) => {
-                app.push_server_msg("Disconnected.");
-                app.set_status("disconnected".to_string());
+        "/disconnect" => {
+            app.irc_stream = None;
+            match app.client.disconnect().await {
+                Ok(()) => {
+                    app.push_server_msg("Disconnected.");
+                    app.set_status("disconnected".to_string());
+                }
+                Err(e) => {
+                    app.set_status(format!("disconnect error: {}", e));
+                }
             }
-            Err(e) => {
-                app.set_status(format!("disconnect error: {}", e));
-            }
-        },
+        }
 
         "/join" => {
             let channel = match parts.get(1) {
@@ -296,6 +312,7 @@ async fn handle_command(app: &mut App, line: &str) {
 
         "/quit" => {
             app.push_server_msg("Goodbye.");
+            app.irc_stream = None;
             let _ = app.client.disconnect().await;
             app.should_quit = true;
         }
@@ -322,29 +339,36 @@ async fn handle_command(app: &mut App, line: &str) {
 // ---------------------------------------------------------------------------
 
 async fn poll_irc_messages(app: &mut App) {
-    let mut stream = match app.client.stream() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    // The stream is acquired once at connect time. If it is absent, there is
+    // nothing to poll (not yet connected, or already disconnected).
+    if app.irc_stream.is_none() {
+        return;
+    }
 
-    // Process up to 10 messages per frame tick without blocking
+    // Process up to 10 messages per frame tick without blocking.
     for _ in 0..10 {
-        match tokio::time::timeout(Duration::from_millis(1), stream.next()).await {
+        let result = {
+            let stream = app.irc_stream.as_mut().expect("checked above");
+            tokio::time::timeout(Duration::from_millis(1), stream.next()).await
+        };
+        match result {
             Ok(Some(Ok(message))) => {
                 process_irc_message(app, message);
             }
             Ok(Some(Err(e))) => {
                 app.push_server_msg(format!("IRC error: {}", e));
+                app.irc_stream = None;
                 let _ = app.client.disconnect().await;
                 return;
             }
             Ok(None) => {
                 app.push_server_msg("Server closed the connection.");
+                app.irc_stream = None;
                 let _ = app.client.disconnect().await;
                 return;
             }
             Err(_) => {
-                // Timeout — no messages available, exit polling for this tick
+                // Timeout — no messages available this tick.
                 return;
             }
         }

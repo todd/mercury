@@ -5,6 +5,11 @@ use crate::irc::client::{ClientConfig, ClientState, IrcClient};
 use crate::irc::channel::ChannelManager;
 use crate::irc::message::OutboundMessage;
 
+/// Type alias for the IRC inbound stream. Stored in `App` so it is acquired
+/// exactly once per connection (the `irc` crate allows only one live stream
+/// per `Client` instance).
+pub type IrcStream = ::irc::client::ClientStream;
+
 // ---------------------------------------------------------------------------
 // Messages displayed in a channel buffer
 // ---------------------------------------------------------------------------
@@ -29,6 +34,11 @@ pub enum BufferLine {
 pub struct App {
     pub client: IrcClient,
     pub channel_mgr: ChannelManager,
+
+    /// Inbound IRC message stream. Acquired once on connect; `None` when
+    /// disconnected. The `irc` crate permits only a single live stream per
+    /// `Client`, so we must not call `client.stream()` more than once.
+    pub irc_stream: Option<IrcStream>,
 
     /// Per-channel message history. Key is lowercase channel name.
     pub buffers: HashMap<String, Vec<BufferLine>>,
@@ -55,6 +65,7 @@ impl App {
         Self {
             client: IrcClient::new(config),
             channel_mgr: ChannelManager::new(),
+            irc_stream: None,
             buffers: HashMap::new(),
             active_channel: None,
             server_buffer: Vec::new(),
