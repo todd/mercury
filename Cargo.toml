@@ -1,0 +1,72 @@
+[package]
+name = "mercury"
+version = "0.1.0"
+edition = "2021"
+description = "An IRCv3 chat client for the terminal"
+license = "MIT"
+
+[[bin]]
+name = "mercury"
+path = "src/main.rs"
+
+[lib]
+name = "mercury"
+path = "src/lib.rs"
+
+[features]
+default = []
+integration = []
+
+[[test]]
+name = "client_test"
+path = "tests/unit/client_test.rs"
+
+[[test]]
+name = "channel_test"
+path = "tests/unit/channel_test.rs"
+
+[[test]]
+name = "connect_integration"
+path = "tests/integration/connect_test.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "channel_integration"
+path = "tests/integration/channel_test.rs"
+required-features = ["integration"]
+
+[dependencies]
+# IRC protocol
+irc = "1.1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization (for IRC config)
+serde = { version = "1", features = ["derive"] }
+
+# Async utilities
+futures = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

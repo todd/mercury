@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  unrealircd:
+    build:
+      context: ./unrealircd
+      dockerfile: Dockerfile
+    container_name: mercury-ircd
+    ports:
+      - "127.0.0.1:6667:6667"
+      - "127.0.0.1:6697:6697"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6667"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s

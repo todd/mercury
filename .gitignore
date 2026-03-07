@@ -1,0 +1,7 @@
+/target/
+Cargo.lock
+*.log
+.env
+.DS_Store
+docker/unrealircd/ircd.motd
+docker/unrealircd/ircd.rules
