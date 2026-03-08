@@ -2,7 +2,7 @@
 /// result caching, and NickServ message construction.
 /// No live network required.
 use mercury::irc::message::OutboundMessage;
-use mercury::irc::user::{is_valid_nick, UserManager};
+use mercury::irc::user::{is_valid_nick, NickServStatus, UserManager};
 use mercury::tui::app::App;
 
 // ---------------------------------------------------------------------------
@@ -360,4 +360,67 @@ fn test_app_nick_updates_after_confirmed_change() {
     app.user_mgr.request_nick_change("renamed").unwrap();
     app.user_mgr.confirm_nick_change("original", "renamed");
     assert_eq!(app.nick(), "renamed");
+}
+
+// ---------------------------------------------------------------------------
+// NickServStatus transitions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nickserv_status_default_is_unregistered() {
+    let mgr = UserManager::new("me").unwrap();
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Unregistered);
+}
+
+#[test]
+fn test_set_nickserv_status_unauthenticated() {
+    let mut mgr = UserManager::new("me").unwrap();
+    mgr.set_nickserv_status(NickServStatus::Unauthenticated);
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Unauthenticated);
+}
+
+#[test]
+fn test_set_nickserv_status_authenticated() {
+    let mut mgr = UserManager::new("me").unwrap();
+    mgr.set_nickserv_status(NickServStatus::Authenticated);
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Authenticated);
+}
+
+/// Progression: Unregistered → Unauthenticated → Authenticated
+#[test]
+fn test_nickserv_status_full_progression() {
+    let mut mgr = UserManager::new("me").unwrap();
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Unregistered);
+
+    mgr.set_nickserv_status(NickServStatus::Unauthenticated);
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Unauthenticated);
+
+    mgr.set_nickserv_status(NickServStatus::Authenticated);
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Authenticated);
+}
+
+/// Own nick change must reset NickServ status to Unregistered.
+#[test]
+fn test_nickserv_status_resets_on_own_nick_change() {
+    let mut mgr = UserManager::new("alice").unwrap();
+    mgr.set_nickserv_status(NickServStatus::Authenticated);
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Authenticated);
+
+    // Simulate own nick change confirmed by server.
+    mgr.request_nick_change("alice2").unwrap();
+    mgr.confirm_nick_change("alice", "alice2");
+
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Unregistered);
+}
+
+/// Another user's nick change must NOT reset our NickServ status.
+#[test]
+fn test_nickserv_status_not_reset_on_other_nick_change() {
+    let mut mgr = UserManager::new("alice").unwrap();
+    mgr.set_nickserv_status(NickServStatus::Authenticated);
+
+    // Someone else changes nick — should not affect our auth status.
+    mgr.confirm_nick_change("carol", "dave");
+
+    assert_eq!(mgr.nickserv_status(), NickServStatus::Authenticated);
 }

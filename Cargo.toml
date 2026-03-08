@@ -40,6 +40,10 @@ name = "user_test"
 path = "tests/unit/user_test.rs"
 
 [[test]]
+name = "app_test"
+path = "tests/unit/app_test.rs"
+
+[[test]]
 name = "user_integration"
 path = "tests/integration/user_test.rs"
 required-features = ["integration"]

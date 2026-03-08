@@ -18,8 +18,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::irc::channel::ChannelManager;
 use crate::irc::message::OutboundMessage;
-use crate::irc::user::UserManager;
-use crate::tui::app::{App, BufferLine, ChatMessage};
+use crate::irc::user::{NickServStatus, UserManager};
+use crate::tui::app::{App, BufferLine, ChatMessage, MemberEntry};
 use crate::tui::ui::draw;
 
 /// Acquire the IRC stream exactly once after a successful connect and store it
@@ -136,6 +136,16 @@ async fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         // Backspace
         KeyCode::Backspace => {
             app.input_backspace();
+        }
+
+        // Alt+Up — previous channel / PM in nav list
+        KeyCode::Up if modifiers.contains(KeyModifiers::ALT) => {
+            app.prev_channel();
+        }
+
+        // Alt+Down — next channel / PM in nav list
+        KeyCode::Down if modifiers.contains(KeyModifiers::ALT) => {
+            app.next_channel();
         }
 
         // Regular characters
@@ -374,7 +384,16 @@ async fn handle_command(app: &mut App, line: &str) {
             }
             let msg = OutboundMessage::PrivMsg { target: target.to_string(), text: text.clone() };
             match app.client.send(&msg) {
-                Ok(()) => { app.push_server_msg(format!("[PM → {}] {}", target, text)); }
+                Ok(()) => {
+                    app.open_private_chat(target);
+                    app.push_channel_line(
+                        &target.to_lowercase(),
+                        BufferLine::Chat(ChatMessage {
+                            nick: app.nick().to_string(),
+                            text,
+                        }),
+                    );
+                }
                 Err(e) => { app.set_status(format!("msg error: {}", e)); }
             }
         }
@@ -479,21 +498,57 @@ async fn poll_irc_messages(app: &mut App) {
 fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
     match &message.command {
         Command::JOIN(channel, _, _) => {
-            app.channel_mgr.confirm_join(channel);
-            app.push_channel_line(
-                channel,
-                BufferLine::System(format!("You joined {}", channel)),
-            );
-            app.buffers.entry(channel.to_lowercase()).or_default();
+            let joining_nick = message
+                .prefix
+                .as_ref()
+                .and_then(|p| match p {
+                    Prefix::Nickname(n, _, _) => Some(n.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let is_ours = joining_nick.eq_ignore_ascii_case(app.user_mgr.current_nick());
+            if is_ours {
+                app.channel_mgr.confirm_join(channel);
+                app.push_channel_line(
+                    channel,
+                    BufferLine::System(format!("You joined {}", channel)),
+                );
+                app.buffers.entry(channel.to_lowercase()).or_default();
+            } else {
+                app.add_channel_member(channel, MemberEntry::new(joining_nick));
+                app.push_channel_line(
+                    channel,
+                    BufferLine::System(format!("{} joined {}", joining_nick, channel)),
+                );
+            }
         }
 
         Command::PART(channel, reason) => {
-            app.channel_mgr.confirm_part(channel);
-            let msg = match reason {
-                Some(r) => format!("You left {}: {}", channel, r),
-                None => format!("You left {}", channel),
-            };
-            app.push_server_msg(msg);
+            let parting_nick = message
+                .prefix
+                .as_ref()
+                .and_then(|p| match p {
+                    Prefix::Nickname(n, _, _) => Some(n.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let is_ours = parting_nick.is_empty()
+                || parting_nick.eq_ignore_ascii_case(app.user_mgr.current_nick());
+            if is_ours {
+                app.channel_mgr.confirm_part(channel);
+                let msg = match reason {
+                    Some(r) => format!("You left {}: {}", channel, r),
+                    None => format!("You left {}", channel),
+                };
+                app.push_server_msg(msg);
+            } else {
+                app.remove_channel_member(channel, parting_nick);
+                let msg = match reason {
+                    Some(r) => format!("{} left {}: {}", parting_nick, channel, r),
+                    None => format!("{} left {}", parting_nick, channel),
+                };
+                app.push_channel_line(channel, BufferLine::System(msg));
+            }
         }
 
         Command::PRIVMSG(target, text) => {
@@ -515,7 +570,49 @@ fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
                     }),
                 );
             } else {
-                app.push_server_msg(format!("[PM from {}] {}", nick, text));
+                // Private message directed at us — open a PM buffer.
+                app.open_private_chat(nick);
+                app.push_channel_line(
+                    nick,
+                    BufferLine::Chat(ChatMessage {
+                        nick: nick.to_string(),
+                        text: text.clone(),
+                    }),
+                );
+            }
+        }
+
+        Command::NOTICE(target, text) => {
+            let from_nick = message
+                .prefix
+                .as_ref()
+                .and_then(|p| match p {
+                    Prefix::Nickname(n, _, _) => Some(n.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            // Detect NickServ notices and update auth status.
+            if from_nick.eq_ignore_ascii_case("NickServ") {
+                let lower = text.to_lowercase();
+                if lower.contains("password accepted")
+                    || lower.contains("you are now identified")
+                    || lower.contains("you are already identified")
+                {
+                    app.user_mgr.set_nickserv_status(NickServStatus::Authenticated);
+                } else if lower.contains("this nickname is registered")
+                    || lower.contains("please choose a different")
+                {
+                    app.user_mgr.set_nickserv_status(NickServStatus::Unauthenticated);
+                }
+            }
+
+            // Display the notice.
+            let display = format!("-{}-  {}", from_nick, text);
+            if target.starts_with('#') || target.starts_with('&') {
+                app.push_channel_line(target, BufferLine::System(display));
+            } else {
+                app.push_server_msg(display);
             }
         }
 
@@ -539,6 +636,7 @@ fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
                     .map(|p| p.eq_ignore_ascii_case(new_nick))
                     .unwrap_or(false);
             app.user_mgr.confirm_nick_change(&old_nick, new_nick);
+            app.rename_channel_member(&old_nick, new_nick);
             if is_ours {
                 app.push_server_msg(format!("You are now known as {}", new_nick));
                 app.set_status(format!("nick: {}", new_nick));
@@ -560,14 +658,24 @@ fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
                     }
                 }
                 Response::RPL_NAMREPLY => {
-                    if args.len() >= 3 {
+                    // args: [me, channel_type, channel, "nick1 @nick2 +nick3"]
+                    if args.len() >= 4 {
                         let channel = args[2].clone();
                         app.channel_mgr.confirm_join(&channel);
                         if let Some(names) = args.last() {
-                            app.push_channel_line(
-                                &channel,
-                                BufferLine::System(format!("Members: {}", names)),
-                            );
+                            let members: Vec<MemberEntry> = names
+                                .split_whitespace()
+                                .map(|token| {
+                                    if let Some(nick) = token.strip_prefix('@') {
+                                        MemberEntry::new(nick).op()
+                                    } else if let Some(nick) = token.strip_prefix('+') {
+                                        MemberEntry::new(nick).voiced()
+                                    } else {
+                                        MemberEntry::new(token)
+                                    }
+                                })
+                                .collect();
+                            app.set_channel_members(&channel, members);
                         }
                     }
                 }

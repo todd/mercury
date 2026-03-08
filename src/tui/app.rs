@@ -1,10 +1,10 @@
 /// Application state — the single source of truth for the TUI.
 use std::collections::HashMap;
 
-use crate::irc::client::{ClientConfig, ClientState, IrcClient};
 use crate::irc::channel::ChannelManager;
+use crate::irc::client::{ClientConfig, ClientState, IrcClient};
 use crate::irc::message::OutboundMessage;
-use crate::irc::user::UserManager;
+use crate::irc::user::{NickServStatus, UserManager};
 
 /// Type alias for the IRC inbound stream. Stored in `App` so it is acquired
 /// exactly once per connection (the `irc` crate allows only one live stream
@@ -28,6 +28,37 @@ pub enum BufferLine {
 }
 
 // ---------------------------------------------------------------------------
+// Channel member
+// ---------------------------------------------------------------------------
+
+/// A single member of a channel as reported by RPL_NAMREPLY / JOIN / PART.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberEntry {
+    /// Display nick (original case).
+    pub nick: String,
+    pub is_op: bool,
+    pub is_voiced: bool,
+}
+
+impl MemberEntry {
+    pub fn new(nick: impl Into<String>) -> Self {
+        Self {
+            nick: nick.into(),
+            is_op: false,
+            is_voiced: false,
+        }
+    }
+    pub fn op(mut self) -> Self {
+        self.is_op = true;
+        self
+    }
+    pub fn voiced(mut self) -> Self {
+        self.is_voiced = true;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -47,6 +78,15 @@ pub struct App {
 
     /// The currently-focused channel (None = server buffer).
     pub active_channel: Option<String>,
+
+    /// Members of each joined channel.  Key = lowercase channel name.
+    /// Each vec is kept sorted: ops first (alpha), then voiced (alpha), then
+    /// regular (alpha).
+    pub channel_members: HashMap<String, Vec<MemberEntry>>,
+
+    /// Open private-message conversations, stored as lowercase nicks in
+    /// alphabetical order.
+    pub private_chats: Vec<String>,
 
     /// The server-level message buffer.
     pub server_buffer: Vec<BufferLine>,
@@ -74,6 +114,8 @@ impl App {
             irc_stream: None,
             buffers: HashMap::new(),
             active_channel: None,
+            channel_members: HashMap::new(),
+            private_chats: Vec::new(),
             server_buffer: Vec::new(),
             input: String::new(),
             should_quit: false,
@@ -151,6 +193,156 @@ impl App {
         let mut chans = self.channel_mgr.joined_channels();
         chans.sort();
         chans
+    }
+
+    /// NickServ authentication status of the local user.
+    pub fn nickserv_status(&self) -> NickServStatus {
+        self.user_mgr.nickserv_status()
+    }
+
+    // -- Channel member list -------------------------------------------------
+
+    /// Replace the member list for a channel with a freshly parsed set.
+    /// Keeps the list sorted: ops → voiced → regular, each group alphabetically.
+    pub fn set_channel_members(&mut self, channel: &str, mut members: Vec<MemberEntry>) {
+        Self::sort_members(&mut members);
+        self.channel_members.insert(channel.to_lowercase(), members);
+    }
+
+    /// Add a member to a channel's list (if not already present).
+    pub fn add_channel_member(&mut self, channel: &str, entry: MemberEntry) {
+        let key = channel.to_lowercase();
+        let list = self.channel_members.entry(key).or_default();
+        let nick_lower = entry.nick.to_lowercase();
+        if !list.iter().any(|m| m.nick.to_lowercase() == nick_lower) {
+            list.push(entry);
+            Self::sort_members(list);
+        }
+    }
+
+    /// Remove a member from a channel's list by nick (case-insensitive).
+    pub fn remove_channel_member(&mut self, channel: &str, nick: &str) {
+        let key = channel.to_lowercase();
+        let nick_lower = nick.to_lowercase();
+        if let Some(list) = self.channel_members.get_mut(&key) {
+            list.retain(|m| m.nick.to_lowercase() != nick_lower);
+        }
+    }
+
+    /// Rename a member across all channel lists (e.g. on a NICK change).
+    pub fn rename_channel_member(&mut self, old_nick: &str, new_nick: &str) {
+        let old_lower = old_nick.to_lowercase();
+        for list in self.channel_members.values_mut() {
+            if let Some(m) = list.iter_mut().find(|m| m.nick.to_lowercase() == old_lower) {
+                m.nick = new_nick.to_string();
+            }
+            Self::sort_members(list);
+        }
+    }
+
+    /// Members of the currently active channel, or an empty slice.
+    pub fn active_channel_members(&self) -> &[MemberEntry] {
+        self.active_channel
+            .as_deref()
+            .and_then(|ch| self.channel_members.get(ch))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn sort_members(list: &mut Vec<MemberEntry>) {
+        list.sort_by(|a, b| {
+            // Ops before voiced before regular.
+            let rank = |m: &MemberEntry| {
+                if m.is_op {
+                    0u8
+                } else if m.is_voiced {
+                    1
+                } else {
+                    2
+                }
+            };
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.nick.to_lowercase().cmp(&b.nick.to_lowercase()))
+        });
+    }
+
+    // -- Private message tracking --------------------------------------------
+
+    /// Ensure a nick has an open PM conversation buffer (idempotent).
+    pub fn open_private_chat(&mut self, nick: &str) {
+        let key = nick.to_lowercase();
+        // Create a buffer entry if needed.
+        self.buffers.entry(key.clone()).or_default();
+        if !self.private_chats.contains(&key) {
+            self.private_chats.push(key);
+            self.private_chats.sort();
+        }
+    }
+
+    /// Whether the active buffer is a private-message conversation.
+    pub fn active_is_pm(&self) -> bool {
+        match &self.active_channel {
+            Some(ch) => self.private_chats.contains(ch),
+            None => false,
+        }
+    }
+
+    /// Whether the active buffer is a joined channel (not server, not PM).
+    pub fn active_is_channel(&self) -> bool {
+        match &self.active_channel {
+            Some(ch) => !self.private_chats.contains(ch),
+            None => false,
+        }
+    }
+
+    // -- Channel navigation --------------------------------------------------
+
+    /// The ordered navigation list: [None (server), channels..., pm_nicks...].
+    /// Each entry is `None` (server) or `Some(lowercase_name)`.
+    fn nav_list(&self) -> Vec<Option<String>> {
+        let mut list: Vec<Option<String>> = vec![None];
+        let mut channels = self.sorted_joined_channels();
+        channels.sort();
+        for ch in channels {
+            list.push(Some(ch));
+        }
+        for pm in &self.private_chats {
+            list.push(Some(pm.clone()));
+        }
+        list
+    }
+
+    /// Switch to the next entry in the navigation list (wraps around).
+    pub fn next_channel(&mut self) {
+        let nav = self.nav_list();
+        if nav.len() <= 1 {
+            return;
+        }
+        let current_idx = nav
+            .iter()
+            .position(|e| e.as_deref() == self.active_channel.as_deref());
+        let next_idx = match current_idx {
+            Some(i) => (i + 1) % nav.len(),
+            None => 0,
+        };
+        self.active_channel = nav[next_idx].clone();
+    }
+
+    /// Switch to the previous entry in the navigation list (wraps around).
+    pub fn prev_channel(&mut self) {
+        let nav = self.nav_list();
+        if nav.len() <= 1 {
+            return;
+        }
+        let current_idx = nav
+            .iter()
+            .position(|e| e.as_deref() == self.active_channel.as_deref());
+        let prev_idx = match current_idx {
+            Some(0) | None => nav.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.active_channel = nav[prev_idx].clone();
     }
 
     /// Handle a raw outbound message — used when the channel manager produces
