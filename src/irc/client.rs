@@ -79,10 +79,20 @@ impl ClientConfig {
 
     /// Build the `irc` crate's `Config` from our config.
     pub(crate) fn to_irc_config(&self) -> Config {
+        // Provide several alternate nicks so the irc crate can complete
+        // registration even if the primary nick is still held by a ghost
+        // connection from a previous session.
+        let alt_nicks = vec![
+            format!("{}_", self.nick),
+            format!("{}__", self.nick),
+            format!("{}_1", self.nick),
+            format!("{}_2", self.nick),
+        ];
         Config {
             server: Some(self.server.clone()),
             port: Some(self.port),
             nickname: Some(self.nick.clone()),
+            alt_nicks,
             realname: Some(self.realname.clone()),
             username: Some(self.username.clone()),
             use_tls: Some(self.use_tls),

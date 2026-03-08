@@ -17,6 +17,9 @@ pub enum MercuryError {
     #[error("Not in channel '{channel}'")]
     NotInChannel { channel: String },
 
+    #[error("Invalid nickname '{nick}': {reason}")]
+    InvalidNick { nick: String, reason: String },
+
     #[error("Already in channel '{channel}'")]
     AlreadyInChannel { channel: String },
 

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::irc::client::{ClientConfig, ClientState, IrcClient};
 use crate::irc::channel::ChannelManager;
 use crate::irc::message::OutboundMessage;
+use crate::irc::user::UserManager;
 
 /// Type alias for the IRC inbound stream. Stored in `App` so it is acquired
 /// exactly once per connection (the `irc` crate allows only one live stream
@@ -34,6 +35,7 @@ pub enum BufferLine {
 pub struct App {
     pub client: IrcClient,
     pub channel_mgr: ChannelManager,
+    pub user_mgr: UserManager,
 
     /// Inbound IRC message stream. Acquired once on connect; `None` when
     /// disconnected. The `irc` crate permits only a single live stream per
@@ -62,9 +64,13 @@ pub struct App {
 impl App {
     pub fn new_disconnected(server: &str, port: u16, nick: &str) -> Self {
         let config = ClientConfig::new(server, port, nick);
+        // UserManager::new panics on invalid nick; ClientConfig::new already
+        // validated it, so this is safe.
+        let user_mgr = UserManager::new(nick).expect("nick validated by ClientConfig");
         Self {
             client: IrcClient::new(config),
             channel_mgr: ChannelManager::new(),
+            user_mgr,
             irc_stream: None,
             buffers: HashMap::new(),
             active_channel: None,
@@ -110,14 +116,9 @@ impl App {
         self.client.state()
     }
 
-    /// Nick of the current user.
+    /// Nick of the current user (server-confirmed via UserManager).
     pub fn nick(&self) -> &str {
-        // Safe: IrcClient keeps config alive
-        // We expose this via the config through a method on IrcClient.
-        // For now we re-read from the inner config by reading from the IrcClient.
-        // We'll return a placeholder; the real nick comes from the server after
-        // connection but we track our requested nick here.
-        "_nick_"
+        self.user_mgr.current_nick()
     }
 
     /// Append a character to the input buffer.

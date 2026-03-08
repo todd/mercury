@@ -1,0 +1,7 @@
+# Mercury project-level Cargo configuration.
+
+[env]
+# Run integration tests sequentially to avoid the UnrealIRCd per-IP
+# reconnect throttle that fires when many connections arrive simultaneously.
+# Override with `cargo test -- --test-threads=N` if needed.
+RUST_TEST_THREADS = { value = "1", condition = { env_not_set = ["RUST_TEST_THREADS"] } }

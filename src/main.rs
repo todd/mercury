@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::irc::channel::ChannelManager;
 use crate::irc::message::OutboundMessage;
+use crate::irc::user::UserManager;
 use crate::tui::app::{App, BufferLine, ChatMessage};
 use crate::tui::ui::draw;
 
@@ -204,6 +205,7 @@ async fn handle_command(app: &mut App, line: &str) {
             let config = crate::irc::client::ClientConfig::new(server, port, nick);
             app.client = crate::irc::client::IrcClient::new(config);
             app.channel_mgr = ChannelManager::new();
+            app.user_mgr = UserManager::new(nick).expect("nick validated by ClientConfig");
             app.irc_stream = None;
 
             match app.client.connect().await {
@@ -310,6 +312,98 @@ async fn handle_command(app: &mut App, line: &str) {
             }
         }
 
+        // -- User management -------------------------------------------------
+
+        "/nick" => {
+            let new_nick = match parts.get(1) {
+                Some(n) => *n,
+                None => { app.set_status("usage: /nick <new_nick>".to_string()); return; }
+            };
+            match app.user_mgr.request_nick_change(new_nick) {
+                Ok(msg) => match app.client.send(&msg) {
+                    Ok(()) => {
+                        app.push_server_msg(format!("Requesting nick change to {}…", new_nick));
+                    }
+                    Err(e) => { app.set_status(format!("nick error: {}", e)); }
+                },
+                Err(e) => { app.set_status(format!("invalid nick: {}", e)); }
+            }
+        }
+
+        "/whois" => {
+            let target = match parts.get(1) {
+                Some(n) => *n,
+                None => { app.set_status("usage: /whois <nick>".to_string()); return; }
+            };
+            match app.user_mgr.build_whois(target) {
+                Ok(msg) => match app.client.send(&msg) {
+                    Ok(()) => {
+                        app.push_server_msg(format!("Querying WHOIS for {}…", target));
+                    }
+                    Err(e) => { app.set_status(format!("whois error: {}", e)); }
+                },
+                Err(e) => { app.set_status(format!("whois error: {}", e)); }
+            }
+        }
+
+        "/who" => {
+            let mask = parts.get(1).copied().unwrap_or("*");
+            match app.user_mgr.build_who(mask) {
+                Ok(msg) => match app.client.send(&msg) {
+                    Ok(()) => {
+                        app.user_mgr.clear_who_results();
+                        app.push_server_msg(format!("WHO {}…", mask));
+                    }
+                    Err(e) => { app.set_status(format!("who error: {}", e)); }
+                },
+                Err(e) => { app.set_status(format!("who error: {}", e)); }
+            }
+        }
+
+        // /msg <nick> <text> — send a private message
+        "/msg" => {
+            let target = match parts.get(1) {
+                Some(t) => *t,
+                None => { app.set_status("usage: /msg <nick> <text>".to_string()); return; }
+            };
+            let text = parts.get(2).copied().unwrap_or("").to_string()
+                + parts.get(3).map(|s| format!(" {}", s)).as_deref().unwrap_or("");
+            if text.trim().is_empty() {
+                app.set_status("usage: /msg <nick> <text>".to_string());
+                return;
+            }
+            let msg = OutboundMessage::PrivMsg { target: target.to_string(), text: text.clone() };
+            match app.client.send(&msg) {
+                Ok(()) => { app.push_server_msg(format!("[PM → {}] {}", target, text)); }
+                Err(e) => { app.set_status(format!("msg error: {}", e)); }
+            }
+        }
+
+        // /ns <command> — send a raw NickServ command
+        // /nickserv <command> — alias
+        "/ns" | "/nickserv" => {
+            // Collect everything after the command word as the NickServ text.
+            let text = line
+                .splitn(2, ' ')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                app.push_server_msg("NickServ commands:");
+                app.push_server_msg("  /ns IDENTIFY <password>");
+                app.push_server_msg("  /ns REGISTER <password> <email>");
+                app.push_server_msg("  /ns GHOST <nick> <password>");
+                app.push_server_msg("  /ns INFO <nick>");
+                return;
+            }
+            let msg = app.user_mgr.build_nickserv(&text);
+            match app.client.send(&msg) {
+                Ok(()) => { app.push_server_msg(format!("[NickServ] {}", text)); }
+                Err(e) => { app.set_status(format!("nickserv error: {}", e)); }
+            }
+        }
+
         "/quit" => {
             app.push_server_msg("Goodbye.");
             app.irc_stream = None;
@@ -324,6 +418,13 @@ async fn handle_command(app: &mut App, line: &str) {
             app.push_server_msg("  /join #channel                   — join a channel");
             app.push_server_msg("  /create #channel                 — create (join) a new channel");
             app.push_server_msg("  /part [#channel] [reason]        — leave a channel");
+            app.push_server_msg("  /nick <new_nick>                 — change your nickname");
+            app.push_server_msg("  /whois <nick>                    — show info about a user");
+            app.push_server_msg("  /who [mask]                      — list users matching mask");
+            app.push_server_msg("  /msg <nick> <text>               — send a private message");
+            app.push_server_msg("  /ns <command>                    — send a NickServ command");
+            app.push_server_msg("  /ns IDENTIFY <password>          — authenticate with NickServ");
+            app.push_server_msg("  /ns REGISTER <password> <email>  — register nick with NickServ");
             app.push_server_msg("  /quit                            — exit Mercury");
             app.push_server_msg("  Ctrl-C / Ctrl-Q                  — force quit");
         }
@@ -422,6 +523,30 @@ fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
             let _ = app.client.send(&OutboundMessage::Pong { server: s.clone() });
         }
 
+        // NICK echo — either our own nick change or another user's.
+        Command::NICK(new_nick) => {
+            let old_nick = message
+                .prefix
+                .as_ref()
+                .and_then(|p| match p {
+                    Prefix::Nickname(n, _, _) => Some(n.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            // Detect whether this is our own nick change before mutating state.
+            let is_ours = old_nick.eq_ignore_ascii_case(app.user_mgr.current_nick())
+                || app.user_mgr.pending_nick()
+                    .map(|p| p.eq_ignore_ascii_case(new_nick))
+                    .unwrap_or(false);
+            app.user_mgr.confirm_nick_change(&old_nick, new_nick);
+            if is_ours {
+                app.push_server_msg(format!("You are now known as {}", new_nick));
+                app.set_status(format!("nick: {}", new_nick));
+            } else {
+                app.push_server_msg(format!("{} is now known as {}", old_nick, new_nick));
+            }
+        }
+
         Command::Response(resp, args) => {
             match resp {
                 Response::RPL_WELCOME => {
@@ -446,12 +571,90 @@ fn process_irc_message(app: &mut App, message: ::irc::proto::Message) {
                         }
                     }
                 }
-                Response::ERR_NICKNAMEINUSE => {
-                    app.push_server_msg("Error: nickname already in use.");
-                    app.set_status("nick in use".to_string());
+
+                // -- WHOIS replies -------------------------------------------
+                // 311: <nick> <user> <host> * :<realname>
+                Response::RPL_WHOISUSER => {
+                    if args.len() >= 4 {
+                        let nick = &args[1];
+                        let user = &args[2];
+                        let host = &args[3];
+                        let realname = args.last().map(|s| s.as_str()).unwrap_or("");
+                        app.user_mgr.handle_whois_user(nick, user, host, realname);
+                        app.push_server_msg(format!(
+                            "[whois] {} ({}@{}) — {}",
+                            nick, user, host, realname
+                        ));
+                    }
                 }
+                // 312: <nick> <server> :<server info>
+                Response::RPL_WHOISSERVER => {
+                    if args.len() >= 3 {
+                        let nick = &args[1];
+                        let server = &args[2];
+                        let info = args.last().map(|s| s.as_str()).unwrap_or("");
+                        app.user_mgr.handle_whois_server(nick, server, info);
+                        app.push_server_msg(format!("[whois] {} via {} ({})", nick, server, info));
+                    }
+                }
+                // 319: <nick> :<channel list>
+                Response::RPL_WHOISCHANNELS => {
+                    if args.len() >= 2 {
+                        let nick = &args[1];
+                        let channels = args.last().map(|s| s.as_str()).unwrap_or("");
+                        app.user_mgr.handle_whois_channels(nick, channels);
+                        app.push_server_msg(format!("[whois] {} channels: {}", nick, channels));
+                    }
+                }
+                // 318: end of WHOIS
+                Response::RPL_ENDOFWHOIS => {}
+
+                // -- WHO replies ---------------------------------------------
+                // 352: <channel> <user> <host> <server> <nick> <flags> :<hops> <realname>
+                Response::RPL_WHOREPLY => {
+                    // args: [me, channel, user, host, server, nick, flags, "hops realname"]
+                    if args.len() >= 7 {
+                        let nick = &args[5];
+                        let user = &args[2];
+                        let host = &args[3];
+                        let server = &args[4];
+                        let flags = &args[6];
+                        let realname = args
+                            .last()
+                            .and_then(|s| s.splitn(2, ' ').nth(1))
+                            .unwrap_or("");
+                        app.user_mgr.handle_who_reply(nick, user, host, server, flags, realname);
+                        let away = if flags.starts_with('G') { " (away)" } else { "" };
+                        app.push_server_msg(format!(
+                            "[who] {}{}  {}@{}  {}",
+                            nick, away, user, host, realname
+                        ));
+                    }
+                }
+                // 315: end of WHO list
+                Response::RPL_ENDOFWHO => {}
+
+                // -- Nick errors ---------------------------------------------
+                Response::ERR_NICKNAMEINUSE => {
+                    let attempted = args.get(1).map(|s| s.as_str()).unwrap_or("?");
+                    app.push_server_msg(format!("Error: nickname '{}' is already in use.", attempted));
+                    app.set_status("nick in use".to_string());
+                    // Roll back any pending nick change.
+                    let current = app.user_mgr.current_nick().to_string();
+                    let _ = app.user_mgr.request_nick_change(&current);
+                }
+                Response::ERR_ERRONEOUSNICKNAME => {
+                    let attempted = args.get(1).map(|s| s.as_str()).unwrap_or("?");
+                    app.push_server_msg(format!("Error: '{}' is not a valid nickname.", attempted));
+                    app.set_status("erroneous nick".to_string());
+                }
+                Response::ERR_NONICKNAMEGIVEN => {
+                    app.push_server_msg("Error: no nickname given.");
+                }
+
                 Response::ERR_NOSUCHNICK => {
-                    app.push_server_msg("Error: no such nick/channel.");
+                    let target = args.get(1).map(|s| s.as_str()).unwrap_or("?");
+                    app.push_server_msg(format!("Error: no such nick/channel '{}'.", target));
                 }
                 _ => {
                     let text = args.join(" ");
