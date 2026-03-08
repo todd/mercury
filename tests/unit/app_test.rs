@@ -317,3 +317,101 @@ fn test_nav_list_order_server_channels_pms() {
     assert_eq!(order[3].as_deref(), Some("alice"), "PMs sorted alpha");
     assert_eq!(order[4].as_deref(), Some("zara"));
 }
+
+// ---------------------------------------------------------------------------
+// Scroll state
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_active_scroll_offset_defaults_to_zero() {
+    let app = app();
+    assert_eq!(app.active_scroll_offset(), 0);
+}
+
+#[test]
+fn test_scroll_up_increases_offset() {
+    let mut app = app();
+    app.scroll_up(3);
+    assert_eq!(app.active_scroll_offset(), 3);
+}
+
+#[test]
+fn test_scroll_up_multiple_steps_accumulate() {
+    let mut app = app();
+    app.scroll_up(2);
+    app.scroll_up(5);
+    assert_eq!(app.active_scroll_offset(), 7);
+}
+
+#[test]
+fn test_scroll_down_decreases_offset() {
+    let mut app = app();
+    app.scroll_up(10);
+    app.scroll_down(4);
+    assert_eq!(app.active_scroll_offset(), 6);
+}
+
+#[test]
+fn test_scroll_down_clamps_at_zero() {
+    let mut app = app();
+    app.scroll_up(3);
+    app.scroll_down(100);
+    assert_eq!(app.active_scroll_offset(), 0);
+}
+
+#[test]
+fn test_scroll_offset_is_per_buffer_independent() {
+    let mut app = app();
+    // Scroll server buffer up.
+    app.scroll_up(5);
+    assert_eq!(app.active_scroll_offset(), 5);
+
+    // Switch to a channel — offset for the channel starts at 0.
+    let _ = app.channel_mgr.join("#test");
+    app.channel_mgr.confirm_join("#test");
+    app.set_active_channel(Some("#test".to_string()));
+    assert_eq!(app.active_scroll_offset(), 0, "channel buffer starts at 0");
+
+    // Scroll the channel buffer.
+    app.scroll_up(2);
+    assert_eq!(app.active_scroll_offset(), 2);
+
+    // Switch back to server — its offset is still 5.
+    app.set_active_channel(None);
+    assert_eq!(
+        app.active_scroll_offset(),
+        5,
+        "server buffer offset preserved"
+    );
+}
+
+#[test]
+fn test_switching_channel_via_next_resets_to_bottom() {
+    let mut app = app();
+    // Scroll the server buffer.
+    app.scroll_up(10);
+    assert_eq!(app.active_scroll_offset(), 10);
+
+    // Navigate to next buffer — this is a *different* buffer, starting at 0.
+    let _ = app.channel_mgr.join("#alpha");
+    app.channel_mgr.confirm_join("#alpha");
+    app.next_channel();
+    assert_eq!(
+        app.active_scroll_offset(),
+        0,
+        "newly visited channel starts at bottom"
+    );
+}
+
+#[test]
+fn test_switching_channel_via_prev_resets_to_bottom() {
+    let mut app = app();
+    let _ = app.channel_mgr.join("#alpha");
+    app.channel_mgr.confirm_join("#alpha");
+    app.set_active_channel(Some("#alpha".to_string()));
+    app.scroll_up(7);
+
+    // prev wraps back to server buffer (which starts at 0 independently).
+    app.prev_channel();
+    assert_eq!(app.active_scroll_offset(), 0);
+}

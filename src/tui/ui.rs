@@ -35,7 +35,7 @@ const PANEL_WIDTH: u16 = 22;
 // ---------------------------------------------------------------------------
 
 /// Root draw function — called on every tick / event.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Vertical split: status bar / main area / input bar
@@ -264,11 +264,34 @@ fn render_member(m: &MemberEntry, own_nick_lower: &str) -> ListItem<'static> {
 // Message pane (centre)
 // ---------------------------------------------------------------------------
 
-fn draw_message_pane(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = app.active_lines();
-    let title = app.active_channel.as_deref().unwrap_or("server");
+/// Count the number of terminal rows a single rendered `Line` occupies when
+/// wrapped inside a pane of `inner_width` columns.  Counts character cells
+/// (each `char` is treated as one cell — sufficient for IRC which is
+/// overwhelmingly ASCII).  Returns at least 1.
+fn rendered_row_count(line: &Line, inner_width: usize) -> usize {
+    if inner_width == 0 {
+        return 1;
+    }
+    let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if total_chars == 0 {
+        1
+    } else {
+        (total_chars + inner_width - 1) / inner_width
+    }
+}
 
-    let rendered: Vec<Line> = lines
+fn draw_message_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Record the visible height so key handlers can issue page-sized scrolls.
+    app.message_pane_height = area.height;
+
+    // Collect everything we need from shared borrows before the mutable call.
+    let title = app
+        .active_channel
+        .as_deref()
+        .unwrap_or("server")
+        .to_string();
+    let rendered: Vec<Line> = app
+        .active_lines()
         .iter()
         .map(|line| match line {
             BufferLine::System(s) => Line::from(Span::styled(
@@ -285,12 +308,38 @@ fn draw_message_pane(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    // Inner width of the pane (subtract the two border columns).
+    let inner_width = (area.width as usize).saturating_sub(2);
+    // Number of visible rows inside the pane (subtract top and bottom borders).
+    let visible_rows = (area.height as usize).saturating_sub(2);
+
+    // Total rendered rows, accounting for wrapped lines.
+    let total_rows: usize = rendered
+        .iter()
+        .map(|l| rendered_row_count(l, inner_width))
+        .sum();
+
+    // Maximum possible scroll offset (can't scroll past the top).
+    let max_offset = total_rows.saturating_sub(visible_rows);
+    // User's requested offset (rows above the bottom); clamped to the ceiling.
+    let scroll_offset = app.active_scroll_offset().min(max_offset);
+    // Final ratatui scroll row: how many rows from the *top* to skip.
+    let scroll_row = max_offset.saturating_sub(scroll_offset) as u16;
+
+    // Show a [scrolled] indicator in the title when not at the live bottom.
+    let is_scrolled = scroll_offset > 0;
+    let title_text = if is_scrolled {
+        format!(" {} [scrolled] ", title)
+    } else {
+        format!(" {} ", title)
+    };
+
     let border_style = Style::default().fg(COLOR_ACTIVE_BORDER);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(
-            format!(" {} ", title),
+            title_text,
             Style::default()
                 .fg(COLOR_ACTIVE_BORDER)
                 .add_modifier(Modifier::BOLD),
@@ -299,10 +348,7 @@ fn draw_message_pane(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(rendered)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((
-            lines.len().saturating_sub(area.height as usize - 2) as u16,
-            0,
-        ));
+        .scroll((scroll_row, 0));
 
     frame.render_widget(paragraph, area);
 }

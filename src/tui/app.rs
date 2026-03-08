@@ -99,6 +99,17 @@ pub struct App {
 
     /// Status message displayed in the bottom status bar.
     pub status_message: Option<String>,
+
+    /// Per-buffer scroll offsets.  Key = lowercase channel/PM name, or the
+    /// sentinel `"__server__"` for the server buffer.  A value of `0` means
+    /// pinned to the bottom (live view); `N > 0` means scrolled N rendered
+    /// rows above the bottom.
+    scroll_offsets: HashMap<String, usize>,
+
+    /// Height (in rows) of the message pane as of the last draw call.  Stored
+    /// here so key handlers can request page-sized scrolls without knowing the
+    /// terminal dimensions.  Defaults to 20 before the first draw.
+    pub message_pane_height: u16,
 }
 
 impl App {
@@ -120,6 +131,8 @@ impl App {
             input: String::new(),
             should_quit: false,
             status_message: None,
+            scroll_offsets: HashMap::new(),
+            message_pane_height: 20,
         }
     }
 
@@ -149,8 +162,13 @@ impl App {
     }
 
     /// Switch focus to the given channel (or `None` for the server buffer).
+    /// The scroll offset for the destination buffer is left unchanged if it
+    /// already exists; a buffer visited for the first time starts at the
+    /// bottom (offset 0).
     pub fn set_active_channel(&mut self, channel: Option<String>) {
         self.active_channel = channel.map(|c| c.to_lowercase());
+        let key = self.active_scroll_key();
+        self.scroll_offsets.entry(key).or_insert(0);
     }
 
     /// Current connection state shorthand.
@@ -186,6 +204,39 @@ impl App {
     /// Clear the status bar message.
     pub fn clear_status(&mut self) {
         self.status_message = None;
+    }
+
+    // -- Scroll state --------------------------------------------------------
+
+    /// The HashMap key used for the currently-active buffer's scroll offset.
+    fn active_scroll_key(&self) -> String {
+        match &self.active_channel {
+            Some(ch) => ch.clone(),
+            None => "__server__".to_string(),
+        }
+    }
+
+    /// How many rendered rows above the bottom the active buffer is scrolled.
+    /// `0` = live / pinned to bottom.
+    pub fn active_scroll_offset(&self) -> usize {
+        let key = self.active_scroll_key();
+        self.scroll_offsets.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Scroll the active buffer up (away from the bottom) by `rows`.
+    /// The upper bound is not enforced here — it is clamped to the actual
+    /// total rendered row count inside `draw_message_pane`.
+    pub fn scroll_up(&mut self, rows: usize) {
+        let key = self.active_scroll_key();
+        *self.scroll_offsets.entry(key).or_insert(0) += rows;
+    }
+
+    /// Scroll the active buffer down (toward the bottom) by `rows`.
+    /// Saturates at 0 (live view).
+    pub fn scroll_down(&mut self, rows: usize) {
+        let key = self.active_scroll_key();
+        let entry = self.scroll_offsets.entry(key).or_insert(0);
+        *entry = entry.saturating_sub(rows);
     }
 
     /// All joined channels in sorted order (for stable rendering).
@@ -327,6 +378,8 @@ impl App {
             None => 0,
         };
         self.active_channel = nav[next_idx].clone();
+        let key = self.active_scroll_key();
+        self.scroll_offsets.entry(key).or_insert(0);
     }
 
     /// Switch to the previous entry in the navigation list (wraps around).
@@ -343,6 +396,8 @@ impl App {
             Some(i) => i - 1,
         };
         self.active_channel = nav[prev_idx].clone();
+        let key = self.active_scroll_key();
+        self.scroll_offsets.entry(key).or_insert(0);
     }
 
     /// Handle a raw outbound message — used when the channel manager produces

@@ -148,6 +148,28 @@ async fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
             app.next_channel();
         }
 
+        // Up arrow (no modifier) — scroll message pane up one line
+        KeyCode::Up => {
+            app.scroll_up(1);
+        }
+
+        // Down arrow (no modifier) — scroll message pane down one line
+        KeyCode::Down => {
+            app.scroll_down(1);
+        }
+
+        // Page Up — scroll message pane up one page
+        KeyCode::PageUp => {
+            let page = app.message_pane_height.saturating_sub(2) as usize;
+            app.scroll_up(page.max(1));
+        }
+
+        // Page Down — scroll message pane down one page
+        KeyCode::PageDown => {
+            let page = app.message_pane_height.saturating_sub(2) as usize;
+            app.scroll_down(page.max(1));
+        }
+
         // Regular characters
         KeyCode::Char(c) => {
             app.input_push(c);
