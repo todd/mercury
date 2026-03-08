@@ -1,10 +1,10 @@
 /// Ratatui rendering: layout, widgets, and draw calls.
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    Frame,
 };
 
 use super::app::{App, BufferLine};
@@ -45,9 +45,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // status bar
-            Constraint::Min(0),     // main area
-            Constraint::Length(3),  // input bar
+            Constraint::Length(1), // status bar
+            Constraint::Min(0),    // main area
+            Constraint::Length(3), // input bar
         ])
         .split(area);
 
@@ -86,28 +86,32 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let server_info = if let Some(srv) = app.client.current_server() {
-        format!(" {} ", srv)
+        format!(" {} — {} ", srv, app.nick())
     } else {
-        " mercury ".to_string()
+        format!(" {} ", app.nick())
     };
 
-    let status_msg = app
-        .status_message
-        .as_deref()
-        .unwrap_or("");
+    let status_msg = app.status_message.as_deref().unwrap_or("");
 
     let spans = vec![
-        Span::styled(" mercury ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " mercury ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("│"),
         Span::styled(server_info, Style::default().fg(Color::White)),
         Span::raw("│"),
         Span::styled(format!(" {} ", state_str), Style::default().fg(state_color)),
         Span::raw("│"),
-        Span::styled(format!(" {} ", status_msg), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" {} ", status_msg),
+            Style::default().fg(Color::DarkGray),
+        ),
     ];
 
-    let paragraph = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
     frame.render_widget(paragraph, area);
 }
 
@@ -123,7 +127,9 @@ fn draw_channel_list(frame: &mut Frame, app: &App, area: Rect) {
 
     // Server buffer entry
     let server_style = if active.is_none() {
-        Style::default().fg(COLOR_CHANNEL_ACTIVE).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(COLOR_CHANNEL_ACTIVE)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(COLOR_CHANNEL_INACTIVE)
     };
@@ -131,7 +137,9 @@ fn draw_channel_list(frame: &mut Frame, app: &App, area: Rect) {
 
     for ch in &channels {
         let style = if Some(ch.as_str()) == active {
-            Style::default().fg(COLOR_CHANNEL_ACTIVE).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(COLOR_CHANNEL_ACTIVE)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(COLOR_CHANNEL_INACTIVE)
         };
@@ -142,9 +150,14 @@ fn draw_channel_list(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(" channels ", Style::default().fg(Color::DarkGray)));
+        .title(Span::styled(
+            " channels ",
+            Style::default().fg(Color::DarkGray),
+        ));
 
-    let list = List::new(items).block(block).style(Style::default().bg(COLOR_BG));
+    let list = List::new(items)
+        .block(block)
+        .style(Style::default().bg(COLOR_BG));
     frame.render_widget(list, area);
 }
 
@@ -154,10 +167,7 @@ fn draw_channel_list(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_message_pane(frame: &mut Frame, app: &App, area: Rect) {
     let lines = app.active_lines();
-    let title = app
-        .active_channel
-        .as_deref()
-        .unwrap_or("server");
+    let title = app.active_channel.as_deref().unwrap_or("server");
 
     let rendered: Vec<Line> = lines
         .iter()
@@ -182,7 +192,9 @@ fn draw_message_pane(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style)
         .title(Span::styled(
             format!(" {} ", title),
-            Style::default().fg(COLOR_ACTIVE_BORDER).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_ACTIVE_BORDER)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let paragraph = Paragraph::new(rendered)
@@ -208,17 +220,22 @@ fn draw_input_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("  ", Style::default().fg(Color::Cyan))
     };
 
-    let input_span = Span::styled(
-        app.input.as_str(),
-        Style::default().fg(Color::White),
-    );
+    let input_span = Span::styled(app.input.as_str(), Style::default().fg(Color::White));
 
-    let cursor = Span::styled("█", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK));
+    let cursor = Span::styled(
+        "█",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::SLOW_BLINK),
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(COLOR_BORDER))
-        .title(Span::styled(" input ", Style::default().fg(Color::DarkGray)));
+        .title(Span::styled(
+            " input ",
+            Style::default().fg(Color::DarkGray),
+        ));
 
     let paragraph = Paragraph::new(Line::from(vec![prompt, input_span, cursor])).block(block);
     frame.render_widget(paragraph, area);

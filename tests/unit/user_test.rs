@@ -1,8 +1,9 @@
-use mercury::irc::message::OutboundMessage;
 /// Unit tests for UserManager: nick validation, nick changes, WHOIS/WHO
 /// result caching, and NickServ message construction.
 /// No live network required.
+use mercury::irc::message::OutboundMessage;
 use mercury::irc::user::{is_valid_nick, UserManager};
+use mercury::tui::app::App;
 
 // ---------------------------------------------------------------------------
 // Nick validation
@@ -336,4 +337,27 @@ fn test_build_nickserv_arbitrary() {
             text: "GHOST alice hunter2".to_string()
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: nick visible in status bar (App::nick reflects connect-time nick)
+// ---------------------------------------------------------------------------
+
+/// Regression test: App::nick() must return the nick supplied at connect time
+/// so that the status bar can display it immediately, before any server-side
+/// nick change is confirmed.
+#[test]
+fn test_app_nick_reflects_connect_time_nick() {
+    let app = App::new_disconnected("localhost", 6667, "testuser");
+    assert_eq!(app.nick(), "testuser");
+}
+
+/// App::nick() must update after a confirmed nick change so the status bar
+/// always shows the current nick.
+#[test]
+fn test_app_nick_updates_after_confirmed_change() {
+    let mut app = App::new_disconnected("localhost", 6667, "original");
+    app.user_mgr.request_nick_change("renamed").unwrap();
+    app.user_mgr.confirm_nick_change("original", "renamed");
+    assert_eq!(app.nick(), "renamed");
 }
