@@ -112,9 +112,22 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         format!(" {}", app.nick())
     };
 
+    // TLS indicator: only shown while connected or connecting.
+    // [tls] in green, [plain] in yellow to draw attention to the insecure case.
+    let tls_span = match state {
+        ClientState::Connected | ClientState::Connecting | ClientState::Disconnecting => {
+            if app.client.is_tls() {
+                Some(Span::styled(" [tls]", Style::default().fg(COLOR_STATUS_CONNECTED)))
+            } else {
+                Some(Span::styled(" [plain]", Style::default().fg(Color::Yellow)))
+            }
+        }
+        ClientState::Disconnected => None,
+    };
+
     let status_msg = app.status_message.as_deref().unwrap_or("");
 
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(
             " mercury ",
             Style::default()
@@ -127,12 +140,18 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" ", Style::default()),
         Span::raw("│"),
         Span::styled(format!(" {} ", state_str), Style::default().fg(state_color)),
-        Span::raw("│"),
-        Span::styled(
-            format!(" {} ", status_msg),
-            Style::default().fg(Color::DarkGray),
-        ),
     ];
+
+    if let Some(s) = tls_span {
+        spans.push(s);
+        spans.push(Span::raw(" "));
+    }
+
+    spans.push(Span::raw("│"));
+    spans.push(Span::styled(
+        format!(" {} ", status_msg),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
     frame.render_widget(paragraph, area);

@@ -52,8 +52,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Build app — default disconnected state
     let mut app = App::new_disconnected("localhost", 6667, "mercury");
-    app.push_server_msg("Welcome to Mercury. Type /connect <server> [port] [nick] to connect.");
-    app.push_server_msg("Commands: /connect  /join  /create  /part  /quit  /help");
+    app.push_server_msg("Welcome to Mercury. Type /connect <server> to connect (TLS on by default).");
+    app.push_server_msg("  Example: /connect irc.libera.chat");
+    app.push_server_msg("  Plain:   /connect irc.libera.chat 6667 mynick --plain");
+    app.push_server_msg("Commands: /connect  /join  /part  /nick  /msg  /quit  /help");
 
     let result = run_app(&mut terminal, &mut app).await;
 
@@ -220,21 +222,59 @@ async fn handle_input_line(app: &mut App, line: String) {
 }
 
 async fn handle_command(app: &mut App, line: &str) {
+    // Split on whitespace; the first token is always the command word.
+    let tokens: Vec<&str> = line.split_whitespace().collect();
     let parts: Vec<&str> = line.splitn(4, ' ').collect();
-    let cmd = parts[0].to_lowercase();
+    let cmd = tokens[0].to_lowercase();
 
     match cmd.as_str() {
         "/connect" => {
-            let server = parts.get(1).copied().unwrap_or("localhost");
-            let port: u16 = parts
-                .get(2)
+            // Syntax: /connect <server> [port] [nick] [--plain] [--no-verify]
+            //
+            // Flags are order-independent and stripped before positional parsing.
+            // TLS is ON by default; --plain opts out.
+            // --no-verify skips certificate validation (shown with a warning).
+
+            // Separate flags from positional tokens.
+            let want_plain   = tokens.iter().any(|t| *t == "--plain");
+            let no_verify    = tokens.iter().any(|t| *t == "--no-verify");
+            let positional: Vec<&str> = tokens[1..]
+                .iter()
+                .filter(|t| **t != "--plain" && **t != "--no-verify")
+                .copied()
+                .collect();
+
+            let server = positional.first().copied().unwrap_or("localhost");
+
+            // Default port: 6697 (TLS) unless --plain is given, then 6667.
+            let default_port: u16 = if want_plain { 6667 } else { 6697 };
+            let port: u16 = positional
+                .get(1)
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(6667);
-            let nick = parts.get(3).copied().unwrap_or("mercury");
+                .unwrap_or(default_port);
 
-            app.push_server_msg(format!("Connecting to {}:{}…", server, port));
+            let nick = positional.get(2).copied().unwrap_or("mercury");
 
-            let config = crate::irc::client::ClientConfig::new(server, port, nick);
+            // Build config, applying flags.
+            let mut config = crate::irc::client::ClientConfig::new(server, port, nick);
+            if want_plain {
+                config = config.plain();
+            }
+            if no_verify {
+                config = config.accept_invalid_certs();
+            }
+
+            let tls_label = if config.is_tls() { " [tls]" } else { " [plain]" };
+            app.push_server_msg(format!("Connecting to {}:{}{}…", server, port, tls_label));
+
+            if no_verify {
+                app.push_server_msg(
+                    "⚠ TLS certificate verification disabled (--no-verify). \
+                     Do not use this on untrusted networks."
+                        .to_string(),
+                );
+            }
+
             app.client = crate::irc::client::IrcClient::new(config);
             app.channel_mgr = ChannelManager::new();
             app.user_mgr = UserManager::new(nick).expect("nick validated by ClientConfig");
@@ -243,7 +283,7 @@ async fn handle_command(app: &mut App, line: &str) {
             match app.client.connect().await {
                 Ok(()) => {
                     attach_stream(app);
-                    app.push_server_msg(format!("Connected to {}:{}", server, port));
+                    app.push_server_msg(format!("Connected to {}:{}{}", server, port, tls_label));
                     app.set_status(format!("connected to {}", server));
                 }
                 Err(e) => {
@@ -454,7 +494,10 @@ async fn handle_command(app: &mut App, line: &str) {
 
         "/help" => {
             app.push_server_msg("Commands:");
-            app.push_server_msg("  /connect <server> [port] [nick]  — connect to server");
+            app.push_server_msg("  /connect <server> [port] [nick] [--plain] [--no-verify]");
+            app.push_server_msg("    Connect to server. TLS on port 6697 by default.");
+            app.push_server_msg("    --plain      use plaintext on port 6667 instead of TLS");
+            app.push_server_msg("    --no-verify  skip TLS certificate validation (⚠ insecure)");
             app.push_server_msg("  /disconnect                      — disconnect from server");
             app.push_server_msg("  /join #channel                   — join a channel");
             app.push_server_msg("  /create #channel                 — create (join) a new channel");
@@ -468,6 +511,9 @@ async fn handle_command(app: &mut App, line: &str) {
             app.push_server_msg("  /ns REGISTER <password> <email>  — register nick with NickServ");
             app.push_server_msg("  /quit                            — exit Mercury");
             app.push_server_msg("  Ctrl-C / Ctrl-Q                  — force quit");
+            app.push_server_msg("  Alt+Up / Alt+Down                — switch channel/PM");
+            app.push_server_msg("  Up/Down arrows                   — scroll message history");
+            app.push_server_msg("  Page Up / Page Down              — scroll by page");
         }
 
         _ => {

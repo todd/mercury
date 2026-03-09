@@ -10,45 +10,51 @@ mod common;
 
 #[cfg(feature = "integration")]
 mod tests {
-    use super::common::{IRC_HOST, IRC_PORT, start_ircd};
+    use super::common::{IRC_HOST, IRC_PORT, IRC_TLS_PORT, start_ircd};
     use mercury::irc::client::{ClientConfig, ClientState, IrcClient};
     use std::time::Duration;
     use futures::StreamExt;
     use ::irc::client::prelude::{Command, Response};
 
-    fn make_client(nick: &str) -> IrcClient {
-        let config = ClientConfig::new(IRC_HOST, IRC_PORT, nick);
+    /// Plain (non-TLS) client on port 6667.
+    fn make_plain_client(nick: &str) -> IrcClient {
+        let config = ClientConfig::new(IRC_HOST, IRC_PORT, nick).plain();
         IrcClient::new(config)
+    }
+
+    /// Helper: read the stream until RPL_WELCOME arrives or the deadline passes.
+    async fn wait_for_welcome(
+        stream: &mut ::irc::client::ClientStream,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        loop {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    if let Command::Response(Response::RPL_WELCOME, _) = msg.command {
+                        return true;
+                    }
+                }
+                Ok(Some(Err(e))) => panic!("stream error: {}", e),
+                Ok(None) | Err(_) => return false,
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_integration_connect_receives_welcome() {
         start_ircd();
-        let mut client = make_client("merc_conn1");
+        let mut client = make_plain_client("merc_conn1");
 
         client.connect().await.expect("should connect to live IRCd");
         assert_eq!(client.state(), ClientState::Connected);
 
-        // Stream messages until RPL_WELCOME or timeout
         let mut stream = client.stream().expect("should get stream");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let mut got_welcome = false;
+        assert!(
+            wait_for_welcome(&mut stream, deadline).await,
+            "should receive RPL_WELCOME (001) on connect"
+        );
 
-        loop {
-            match tokio::time::timeout_at(deadline, stream.next()).await {
-                Ok(Some(Ok(msg))) => {
-                    if let Command::Response(Response::RPL_WELCOME, _) = msg.command {
-                        got_welcome = true;
-                        break;
-                    }
-                }
-                Ok(Some(Err(e))) => panic!("stream error: {}", e),
-                Ok(None) => break,
-                Err(_) => break, // timeout
-            }
-        }
-
-        assert!(got_welcome, "should receive RPL_WELCOME (001) on connect");
         client.disconnect().await.expect("should disconnect cleanly");
         assert_eq!(client.state(), ClientState::Disconnected);
     }
@@ -63,7 +69,7 @@ mod tests {
     #[tokio::test]
     async fn test_stream_can_only_be_called_once() {
         start_ircd();
-        let mut client = make_client("merc_stream1");
+        let mut client = make_plain_client("merc_stream1");
         client.connect().await.expect("connect");
 
         // First call succeeds and returns the live stream.
@@ -82,13 +88,47 @@ mod tests {
     #[tokio::test]
     async fn test_integration_disconnect_is_clean() {
         start_ircd();
-        let mut client = make_client("merc_conn2");
+        let mut client = make_plain_client("merc_conn2");
         client.connect().await.expect("connect");
         assert_eq!(client.state(), ClientState::Connected);
         client.disconnect().await.expect("disconnect");
         assert_eq!(client.state(), ClientState::Disconnected);
         // Second disconnect is a no-op
         client.disconnect().await.expect("second disconnect is no-op");
+        assert_eq!(client.state(), ClientState::Disconnected);
+    }
+
+    /// TLS connection test — connects on port 6697 with a self-signed cert.
+    ///
+    /// The UnrealIRCd test container generates a self-signed certificate at
+    /// build time (see docker/unrealircd/Dockerfile), so certificate validation
+    /// must be bypassed with `accept_invalid_certs()`.  This mirrors what a
+    /// user would do with `/connect <server> --no-verify` against a server that
+    /// lacks a CA-signed certificate.
+    #[tokio::test]
+    async fn test_integration_connect_tls_receives_welcome() {
+        start_ircd();
+
+        let config = ClientConfig::new(IRC_HOST, IRC_TLS_PORT, "merc_tls1")
+            .accept_invalid_certs(); // self-signed cert in test container
+        let mut client = IrcClient::new(config);
+
+        assert!(client.is_tls(), "client should be configured for TLS");
+
+        client
+            .connect()
+            .await
+            .expect("should connect over TLS to live IRCd");
+        assert_eq!(client.state(), ClientState::Connected);
+
+        let mut stream = client.stream().expect("should get stream");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        assert!(
+            wait_for_welcome(&mut stream, deadline).await,
+            "should receive RPL_WELCOME (001) over TLS"
+        );
+
+        client.disconnect().await.expect("should disconnect cleanly");
         assert_eq!(client.state(), ClientState::Disconnected);
     }
 }

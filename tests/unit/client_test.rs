@@ -3,6 +3,83 @@
 use mercury::irc::client::{ClientConfig, ClientState, IrcClient};
 
 // ---------------------------------------------------------------------------
+// TLS configuration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_client_config_tls_on_by_default() {
+    let config = ClientConfig::new("irc.example.com", 6697, "mercury_test");
+    assert!(config.is_tls(), "TLS should be on by default");
+}
+
+#[test]
+fn test_client_config_plain_disables_tls() {
+    let config = ClientConfig::new("irc.example.com", 6667, "mercury_test").plain();
+    assert!(!config.is_tls(), "plain() should disable TLS");
+}
+
+#[test]
+fn test_client_config_accept_invalid_certs_default_false() {
+    let config = ClientConfig::new("irc.example.com", 6697, "mercury_test");
+    assert!(
+        !config.danger_accept_invalid_certs(),
+        "cert validation should be on by default"
+    );
+}
+
+#[test]
+fn test_client_config_accept_invalid_certs_builder() {
+    let config = ClientConfig::new("irc.example.com", 6697, "mercury_test")
+        .accept_invalid_certs();
+    assert!(
+        config.danger_accept_invalid_certs(),
+        "accept_invalid_certs() should set the danger flag"
+    );
+}
+
+#[test]
+fn test_irc_config_tls_flag_propagates() {
+    let config = ClientConfig::new("irc.example.com", 6697, "mercury_test");
+    let irc_cfg = config.to_irc_config();
+    assert_eq!(
+        irc_cfg.use_tls,
+        Some(true),
+        "use_tls=true must reach the irc crate config"
+    );
+}
+
+#[test]
+fn test_irc_config_plain_flag_propagates() {
+    let config = ClientConfig::new("irc.example.com", 6667, "mercury_test").plain();
+    let irc_cfg = config.to_irc_config();
+    assert_eq!(
+        irc_cfg.use_tls,
+        Some(false),
+        "use_tls=false must reach the irc crate config after plain()"
+    );
+}
+
+#[test]
+fn test_irc_config_danger_flag_propagates() {
+    let config = ClientConfig::new("irc.example.com", 6697, "mercury_test")
+        .accept_invalid_certs();
+    let irc_cfg = config.to_irc_config();
+    assert_eq!(
+        irc_cfg.dangerously_accept_invalid_certs,
+        Some(true),
+        "dangerously_accept_invalid_certs must reach the irc crate config"
+    );
+}
+
+#[test]
+fn test_irc_client_is_tls_reflects_config() {
+    let tls_config = ClientConfig::new("irc.example.com", 6697, "mercury_test");
+    let plain_config = ClientConfig::new("irc.example.com", 6667, "mercury_test").plain();
+    assert!(IrcClient::new(tls_config).is_tls());
+    assert!(!IrcClient::new(plain_config).is_tls());
+}
+
+// ---------------------------------------------------------------------------
 // Configuration validation tests
 // ---------------------------------------------------------------------------
 
@@ -16,8 +93,10 @@ fn test_client_config_valid() {
 
 #[test]
 fn test_client_config_default_port() {
+    // with_defaults uses 6697 — the standard IRC-over-TLS port — because TLS
+    // is on by default.
     let config = ClientConfig::with_defaults("irc.example.com", "mercury_test");
-    assert_eq!(config.port(), 6667);
+    assert_eq!(config.port(), 6697);
 }
 
 #[test]

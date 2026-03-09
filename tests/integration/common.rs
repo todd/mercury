@@ -4,7 +4,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub const IRC_HOST: &str = "127.0.0.1";
+/// Plain IRC port (no TLS).
 pub const IRC_PORT: u16 = 6667;
+/// IRC-over-TLS port.
+pub const IRC_TLS_PORT: u16 = 6697;
 pub const TEST_NICK: &str = "mercury_test";
 pub const COMPOSE_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/docker/docker-compose.yml");
 

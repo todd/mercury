@@ -19,23 +19,32 @@ pub struct ClientConfig {
     nick: String,
     realname: String,
     username: String,
+    /// Whether to use TLS for the connection. Defaults to `true`.
     use_tls: bool,
+    /// Skip TLS certificate verification. Should only be set for testing
+    /// against servers with self-signed certificates. Defaults to `false`.
+    danger_accept_invalid_certs: bool,
 }
 
 impl ClientConfig {
     /// Construct a config, panicking on invalid input. Use for tests and
     /// hardcoded defaults where values are known-good.
+    ///
+    /// TLS is **on** by default. Call `.plain()` to disable it.
     pub fn new(server: &str, port: u16, nick: &str) -> Self {
         Self::try_new(server, port, nick)
             .expect("ClientConfig::new called with invalid arguments")
     }
 
-    /// Construct with default port 6667.
+    /// Construct with default port 6697 (standard IRC-over-TLS port).
     pub fn with_defaults(server: &str, nick: &str) -> Self {
-        Self::new(server, 6667, nick)
+        Self::new(server, 6697, nick)
     }
 
     /// Fallible constructor — returns `Err` on invalid input.
+    ///
+    /// TLS is **on** by default. Call `.plain()` on the returned value to
+    /// disable it.
     pub fn try_new(server: &str, port: u16, nick: &str) -> Result<Self> {
         if server.is_empty() {
             return Err(MercuryError::InvalidChannelName {
@@ -61,9 +70,28 @@ impl ClientConfig {
             nick: nick.to_string(),
             realname: "Mercury IRC Client".to_string(),
             username: nick.to_string(),
-            use_tls: false,
+            use_tls: true,
+            danger_accept_invalid_certs: false,
         })
     }
+
+    // -- Builder methods -----------------------------------------------------
+
+    /// Disable TLS (plaintext connection). Use only when the server does not
+    /// support TLS or for local testing.
+    pub fn plain(mut self) -> Self {
+        self.use_tls = false;
+        self
+    }
+
+    /// Accept TLS certificates that would otherwise fail validation (e.g.
+    /// self-signed). **Never use this in production.**
+    pub fn accept_invalid_certs(mut self) -> Self {
+        self.danger_accept_invalid_certs = true;
+        self
+    }
+
+    // -- Accessors -----------------------------------------------------------
 
     pub fn server(&self) -> &str {
         &self.server
@@ -77,8 +105,18 @@ impl ClientConfig {
         &self.nick
     }
 
+    /// Whether TLS is enabled for this config.
+    pub fn is_tls(&self) -> bool {
+        self.use_tls
+    }
+
+    /// Whether certificate validation is intentionally bypassed.
+    pub fn danger_accept_invalid_certs(&self) -> bool {
+        self.danger_accept_invalid_certs
+    }
+
     /// Build the `irc` crate's `Config` from our config.
-    pub(crate) fn to_irc_config(&self) -> Config {
+    pub fn to_irc_config(&self) -> Config {
         // Provide several alternate nicks so the irc crate can complete
         // registration even if the primary nick is still held by a ghost
         // connection from a previous session.
@@ -96,6 +134,7 @@ impl ClientConfig {
             realname: Some(self.realname.clone()),
             username: Some(self.username.clone()),
             use_tls: Some(self.use_tls),
+            dangerously_accept_invalid_certs: Some(self.danger_accept_invalid_certs),
             // Disable default channel joining
             channels: vec![],
             ..Default::default()
@@ -163,6 +202,11 @@ impl IrcClient {
     /// The current nick.
     pub fn nick(&self) -> &str {
         self.config.nick()
+    }
+
+    /// Whether this connection uses TLS.
+    pub fn is_tls(&self) -> bool {
+        self.config.is_tls()
     }
 
     /// Connect to the configured IRC server.
