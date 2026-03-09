@@ -8,6 +8,13 @@ Always follow Test-Driven Design (TDD) principles when adding new features or fi
 2. **Write the minimum implementation** needed to make the test pass.
 3. **Refactor** the implementation as needed, keeping all tests green.
 
+## Documentation
+
+When adding a new feature or changing existing behaviour, update the relevant
+file(s) in `docs/` to reflect the change. If the change introduces a
+brand-new user-facing concept that does not fit an existing page, add a new
+numbered page and link to it from `docs/01-getting-started.md`.
+
 ## Bug fixes
 
 Any time a bug is fixed, a regression test must also be added that covers the
