@@ -1,181 +1,112 @@
-/// Word-wrap row counting — matches ratatui's `Wrap { trim: false }` behaviour.
+/// Row-counting helpers for the message pane scroll calculation.
 ///
-/// This module exists so the row-count logic can be unit-tested independently
-/// of the rendering layer, and so `ui.rs` and tests share a single canonical
-/// implementation.
-
-/// Count the number of terminal rows that a string of `text` occupies when
-/// rendered in a pane of `inner_width` columns with word-wrapping enabled
-/// (`Wrap { trim: false }`).
-///
-/// The algorithm mirrors ratatui's internal `WordWrapper`:
-///
-/// 1. The text is tokenised into alternating runs of whitespace and
-///    non-whitespace characters.
-/// 2. Each token is placed on the current row if it fits (`col + len <=
-///    inner_width`).
-/// 3. If a token does not fit and the row is non-empty, a new row is started
-///    and the token is retried from column 0.
-/// 4. A token that is wider than `inner_width` itself (and begins at column 0)
-///    is character-split across rows.
-/// 5. Leading whitespace on a wrapped row is **not** stripped (`trim: false`).
-///
-/// Returns at least 1 (an empty or zero-width-pane always occupies one row).
-pub fn word_wrap_line_count(text: &str, inner_width: usize) -> usize {
-    if inner_width == 0 || text.is_empty() {
-        return 1;
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut rows = 1usize;
-    let mut col = 0usize; // current column within the active row
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        // Collect a run of characters with the same whitespace classification.
-        let is_ws = chars[i].is_whitespace();
-        let token_start = i;
-        while i < chars.len() && chars[i].is_whitespace() == is_ws {
-            i += 1;
-        }
-        // Display width: 1 per char (correct for ASCII / typical IRC text).
-        let token_width = i - token_start;
-
-        if col + token_width <= inner_width {
-            // Token fits on the current row.
-            col += token_width;
-        } else if col == 0 {
-            // Token is wider than the whole pane; character-split it across rows.
-            let mut remaining = token_width;
-            while remaining > 0 {
-                let space = inner_width - col;
-                let take = space.min(remaining);
-                col += take;
-                remaining -= take;
-                if remaining > 0 {
-                    rows += 1;
-                    col = 0;
-                }
-            }
-        } else {
-            // Token does not fit on the current row; wrap and retry from col 0.
-            rows += 1;
-            col = 0;
-            i = token_start; // re-process this token on the new row
-        }
-    }
-
-    rows
-}
+/// The authoritative row count for a rendered [`Line`] is obtained through
+/// [`Paragraph::line_count`] (ratatui's own API, enabled via the
+/// `unstable-rendered-line-info` cargo feature).  This module provides
+/// regression tests that document the failure mode of the original character-
+/// count formula and verify that [`Paragraph::line_count`] produces correct
+/// results for common IRC message patterns.
 
 #[cfg(test)]
 mod tests {
-    use super::word_wrap_line_count as wc;
+    use ratatui::{
+        text::{Line, Span},
+        style::{Color, Modifier, Style},
+        widgets::{Paragraph, Wrap},
+    };
 
-    // ------------------------------------------------------------------
-    // Edge cases
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn empty_text_is_one_row() {
-        assert_eq!(wc("", 80), 1);
+    /// Helper: how many terminal rows does `line` occupy in `width` columns?
+    fn row_count(line: Line, width: u16) -> usize {
+        Paragraph::new(line)
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1)
     }
 
-    #[test]
-    fn zero_width_pane_is_one_row() {
-        assert_eq!(wc("hello", 0), 1);
+    /// Helper for plain-text lines (system messages, etc.)
+    fn row_count_str(text: &str, width: u16) -> usize {
+        row_count(Line::from(text), width)
     }
 
-    #[test]
-    fn short_text_fits_on_one_row() {
-        assert_eq!(wc("hello world", 80), 1);
-    }
+    // -----------------------------------------------------------------------
+    // Regression: the original char-count formula `ceil(chars / width)` was
+    // wrong.  Word-wrap can require MORE rows because words are never split
+    // mid-word (trailing space leaves unused columns at the end of each row).
+    // -----------------------------------------------------------------------
 
-    #[test]
-    fn text_exactly_fills_one_row() {
-        // "hello" = 5 chars, inner_width = 5  →  1 row
-        assert_eq!(wc("hello", 5), 1);
-    }
-
-    // ------------------------------------------------------------------
-    // Key regression: word-wrap uses MORE rows than ceil(chars / width)
-    // ------------------------------------------------------------------
-
-    /// The case that exposed the original bug.
+    /// The concrete case that exposed the original scroll bug.
+    ///
     /// "aa bbb cc" (9 chars) in a 5-col pane:
-    ///   character formula → ceil(9/5) = 2
-    ///   word-wrap actual  → row1="aa " row2="bbb " row3="cc"  = 3
+    ///   OLD formula → ceil(9/5) = 2   ← wrong
+    ///   Correct (word-wrap) → 3 rows  ← verified below
     #[test]
     fn word_wrap_needs_more_rows_than_char_ceil() {
-        assert_eq!(wc("aa bbb cc", 5), 3);
+        assert_eq!(row_count_str("aa bbb cc", 5), 3);
     }
 
-    /// Three words that each nearly fill the pane width.
+    /// Three words that each nearly fill the pane.
+    ///
     /// "word1 word2 word3" (17 chars) in a 10-col pane:
-    ///   character formula → ceil(17/10) = 2
-    ///   word-wrap actual  → row1="word1 " row2="word2 " row3="word3" = 3
+    ///   OLD formula → ceil(17/10) = 2  ← wrong
+    ///   Correct     → 3 rows           ← verified below
     #[test]
     fn three_words_each_near_pane_width() {
-        assert_eq!(wc("word1 word2 word3", 10), 3);
+        assert_eq!(row_count_str("word1 word2 word3", 10), 3);
     }
 
-    // ------------------------------------------------------------------
-    // Character wrapping (single word wider than pane)
-    // ------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // IRC message format sanity checks
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn single_word_wider_than_pane_is_char_split() {
-        // "helloworld" (10 chars) in a 4-col pane → 3 rows
-        assert_eq!(wc("helloworld", 4), 3);
-    }
-
-    #[test]
-    fn long_word_followed_by_short_word() {
-        // "hellooooooo world" — "hellooooooo" (11) splits across rows;
-        // " world" continues on next row.
-        // row1="helloooooo"(10) row2="o world"(7) → 2 rows in width 10
-        assert_eq!(wc("hellooooooo world", 10), 2);
-    }
-
-    // ------------------------------------------------------------------
-    // Whitespace handling (trim: false — leading whitespace is preserved)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn leading_spaces_count_toward_row_width() {
-        // "  abc" (5 chars) in a 5-col pane → 1 row
-        assert_eq!(wc("  abc", 5), 1);
+    fn short_message_fits_on_one_row() {
+        assert_eq!(row_count_str("hello world", 80), 1);
     }
 
     #[test]
-    fn irc_system_message_format() {
-        // System messages are formatted as "  {text}" with 2 leading spaces.
-        // Short message — 1 row regardless.
-        assert_eq!(wc("  You joined #general", 80), 1);
+    fn system_message_short() {
+        assert_eq!(row_count_str("  You joined #general", 80), 1);
     }
 
     #[test]
-    fn irc_chat_message_format_short() {
-        // Chat messages: " <nick> text" concatenated from two spans.
-        assert_eq!(wc(" <alice> hello world", 80), 1);
+    fn chat_message_single_span_short() {
+        assert_eq!(row_count_str(" <alice> hello world", 80), 1);
+    }
+
+    /// Chat messages use two styled spans: ` <nick>` and ` text`.
+    /// Ratatui wraps the combined content, not each span independently.
+    #[test]
+    fn chat_message_two_spans_wraps_correctly() {
+        let line = Line::from(vec![
+            Span::styled(
+                " <alice>",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" hello world this is a test of wrapping behaviour"),
+        ]);
+        // At width 40 the combined 58-char string wraps to 2 rows.
+        assert_eq!(row_count(line.clone(), 40), 2);
+        // At width 80 it fits on 1 row.
+        assert_eq!(row_count(line, 80), 1);
+    }
+
+    /// Space that exactly fills a row is consumed at the wrap boundary;
+    /// the next word starts at col 0, not col 1.
+    #[test]
+    fn inter_word_space_at_row_boundary_is_consumed() {
+        // "hello" = 5 chars fills the row exactly; " world" should not push
+        // "world" to a third row.
+        assert_eq!(row_count_str("hello world", 5), 2);
     }
 
     #[test]
-    fn irc_chat_message_wraps_at_word_boundary() {
-        // " <alice> " (9) + "word1 word2" — total 20 chars in a 19-col pane.
-        // row1=" <alice> word1 " (15) then "word2"(5) doesn't fit → row2="word2"
-        // → 2 rows.
-        assert_eq!(wc(" <alice> word1 word2", 19), 2);
+    fn long_word_wider_than_pane_is_char_split() {
+        // "helloworld" (10 chars) in a 4-col pane → ceil(10/4) = 3 rows.
+        assert_eq!(row_count_str("helloworld", 4), 3);
     }
 
-    // ------------------------------------------------------------------
-    // Matches ceil(chars/width) when wrapping is clean
-    // ------------------------------------------------------------------
-
     #[test]
-    fn clean_wrap_matches_char_formula() {
-        // "hello world" (11 chars) in a 10-col pane:
-        //   row1="hello " (6) row2="world"(5) → 2 rows = ceil(11/10)
-        assert_eq!(wc("hello world", 10), 2);
+    fn empty_text_one_row() {
+        assert_eq!(row_count_str("", 80), 1);
     }
 }
