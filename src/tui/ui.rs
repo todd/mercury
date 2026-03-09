@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use super::app::{App, BufferLine, MemberEntry};
+use super::layout::word_wrap_line_count;
 use crate::irc::client::ClientState;
 use crate::irc::user::NickServStatus;
 
@@ -284,19 +285,14 @@ fn render_member(m: &MemberEntry, own_nick_lower: &str) -> ListItem<'static> {
 // ---------------------------------------------------------------------------
 
 /// Count the number of terminal rows a single rendered `Line` occupies when
-/// wrapped inside a pane of `inner_width` columns.  Counts character cells
-/// (each `char` is treated as one cell — sufficient for IRC which is
-/// overwhelmingly ASCII).  Returns at least 1.
+/// word-wrapped inside a pane of `inner_width` columns.
+///
+/// Delegates to [`word_wrap_line_count`] which mirrors ratatui's
+/// `Wrap { trim: false }` algorithm exactly, so the scroll offset calculation
+/// stays in sync with what ratatui actually renders.
 fn rendered_row_count(line: &Line, inner_width: usize) -> usize {
-    if inner_width == 0 {
-        return 1;
-    }
-    let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    if total_chars == 0 {
-        1
-    } else {
-        (total_chars + inner_width - 1) / inner_width
-    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    word_wrap_line_count(&text, inner_width)
 }
 
 fn draw_message_pane(frame: &mut Frame, app: &mut App, area: Rect) {
