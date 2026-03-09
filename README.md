@@ -1,5 +1,7 @@
 # Mercury
 
+![Mercury](mercury.png)
+
 An IRCv3 chat client for POSIX terminals, written in Rust.
 
 ## Features
